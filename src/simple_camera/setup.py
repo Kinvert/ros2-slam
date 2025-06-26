@@ -22,6 +22,7 @@ setup(
         'console_scripts': [
             'camera_publisher = simple_camera.camera_publisher:main',
             'camera_subscriber = simple_camera.camera_subscriber:main',
+            'simple_publisher = simple_camera.simple_publisher:main',
         ],
     },
 )
