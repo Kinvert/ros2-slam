@@ -8,8 +8,13 @@ class SimpleCameraPublisher(Node):
     def __init__(self):
         super().__init__('simple_camera_publisher')
         self.publisher_ = self.create_publisher(CompressedImage, 'camera/image/compressed', 10)
-        self.timer = self.create_timer(0.1, self.timer_callback)  # 10 FPS
+        self.timer = self.create_timer(0.5, self.timer_callback)  # 10 FPS
         self.cap = cv2.VideoCapture(0)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+        #self.cap.set(cv2.CAP_PROP_MONOCHROME, 1) # doesnt change
+        #self.cap.set(cv2.CAP_PROP_FORMAT, cv2.CV_8UC1) # doesnt change
+        #self.cap.set(cv2.CAP_PROP_CONVERT_RGB, 0) # seems to break it
         self.get_logger().info('Simple camera publisher started')
 
     def timer_callback(self):
