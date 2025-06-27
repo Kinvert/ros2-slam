@@ -1,0 +1,50 @@
+# ROS2 build artifacts
+build/
+install/
+log/
+_build/
+
+# Colcon and ament ignore markers
+COLCON_IGNORE
+AMENT_IGNORE
+
+# Generated documentation
+*.dox
+*.wikidoc
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Editor and IDE files
+.vscode/
+.idea/
+.project
+.cproject
+.qodo/
+.qodo
+*.user
+CMakeLists.txt.user
+
+# Qt Creator
+qtcreator-*
+
+# Emacs and vim swap files
+*~
+.#*
+*.swp
+
+# Miscellaneous
+*.pcd
+srv/_*.py
+
+# Compiled object files
+*.o
+*.obj
+*.lo
+*.slo
+
+# Precompiled headers
+*.gch
+*.pch
+
