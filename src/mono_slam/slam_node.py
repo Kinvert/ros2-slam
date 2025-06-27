@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import CompressedImage
+from geometry_msgs.msg import PoseStamped, Point
+from visualization_msgs.msg import Marker, MarkerArray
+import cv2
+import numpy as np
+from collections import deque
+
+class MonoSLAM(Node):
+    def __init__(self):
+        super().__init__('mono_slam')
+        
+        # Subscribers
+        self.image_sub = self.create_subscription(
+            CompressedImage,
+            'camera/image/compressed',
+            self.image_callback,
+            10)
+        
+        # Publishers
+        self.pose_pub = self.create_publisher(PoseStamped, 'slam/pose', 10)
+        self.points_pub = self.create_publisher(MarkerArray, 'slam/points', 10)
+        self.trajectory_pub = self.create_publisher(Marker, 'slam/trajectory', 10)
+        
+        # SLAM state
+        self.prev_frame = None
+        self.prev_kp = None
+        self.prev_des = None
+        
+        # Camera pose (simplified - just 2D translation for now)
+        self.camera_x = 0.0
+        self.camera_y = 0.0
+        self.camera_z = 0.0
+        
+        # Feature detector
+        self.orb = cv2.ORB_create(nfeatures=500)
+        self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        
+        # Map points (3D landmarks)
+        self.map_points = []
+        
+        # Trajectory
+        self.trajectory = deque(maxlen=1000)
+        
+        # Camera matrix (you'll need to calibrate your camera for better results)
+        # These are rough estimates - calibrate your actual camera!
+        self.K = np.array([[500, 0, 320],
+                          [0, 500, 240],
+                          [0, 0, 1]], dtype=np.float32)
+        
+        self.get_logger().info('SLAM node started')
+
+    def image_callback(self, msg):
+        try:
+            # Decode image
+            np_arr = np.frombuffer(msg.data, np.uint8)
+            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            
+            # Detect features
+            kp, des = self.orb.detectAndCompute(gray, None)
+            
+            if self.prev_frame is not None and des is not None and self.prev_des is not None:
+                # Match features
+                matches = self.matcher.match(self.prev_des, des)
+                matches = sorted(matches, key=lambda x: x.distance)
+                
+                if len(matches) > 10:  # Need sufficient matches
+                    # Extract matched points
+                    prev_pts = np.float32([self.prev_kp[m.queryIdx].pt for m in matches[:50]]).reshape(-1, 1, 2)
+                    curr_pts = np.float32([kp[m.trainIdx].pt for m in matches[:50]]).reshape(-1, 1, 2)
+                    
+                    # Estimate essential matrix
+                    E, mask = cv2.findEssentialMat(prev_pts, curr_pts, self.K, method=cv2.RANSAC)
+                    
+                    if E is not None:
+                        # Recover pose
+                        _, R, t, mask_pose = cv2.recoverPose(E, prev_pts, curr_pts, self.K)
+                        
+                        # Update camera position (simplified)
+                        self.camera_x += t[0, 0] * 0.1  # Scale factor
+                        self.camera_y += t[1, 0] * 0.1
+                        self.camera_z += t[2, 0] * 0.1
+                        
+                        # Add to trajectory
+                        self.trajectory.append((self.camera_x, self.camera_y, self.camera_z))
+                        
+                        # Triangulate points for map
+                        if len(self.map_points) < 100:  # Limit map size
+                            self.triangulate_points(prev_pts, curr_pts, R, t)
+                        
+                        # Publish pose
+                        self.publish_pose()
+                        
+                        # Publish visualization
+                        self.publish_trajectory()
+                        self.publish_map_points()
+                        
+                        self.get_logger().info(f'Position: x={self.camera_x:.2f}, y={self.camera_y:.2f}, z={self.camera_z:.2f}, Features: {len(matches)}')
+            
+            # Store current frame data
+            self.prev_frame = gray.copy()
+            self.prev_kp = kp
+            self.prev_des = des
+            
+        except Exception as e:
+            self.get_logger().error(f'SLAM processing error: {str(e)}')
+
+    def triangulate_points(self, prev_pts, curr_pts, R, t):
+        """Simple triangulation to create 3D map points"""
+        try:
+            # Create projection matrices
+            P1 = np.dot(self.K, np.hstack((np.eye(3), np.zeros((3, 1)))))
+            P2 = np.dot(self.K, np.hstack((R, t)))
+            
+            # Triangulate a few points
+            for i in range(0, min(len(prev_pts), 20), 5):  # Sample every 5th point
+                pt1 = prev_pts[i].reshape(2)
+                pt2 = curr_pts[i].reshape(2)
+                
+                # Triangulate
+                point_4d = cv2.triangulatePoints(P1, P2, pt1.reshape(2, 1), pt2.reshape(2, 1))
+                point_3d = point_4d[:3] / point_4d[3]
+                
+                # Add to map if reasonable depth
+                if 0.1 < point_3d[2] < 10.0:
+                    self.map_points.append((
+                        float(point_3d[0] + self.camera_x),
+                        float(point_3d[1] + self.camera_y),
+                        float(point_3d[2] + self.camera_z)
+                    ))
+        except Exception as e:
+            self.get_logger().warn(f'Triangulation error: {str(e)}')
+
+    def publish_pose(self):
+        """Publish current camera pose"""
+        pose_msg = PoseStamped()
+        pose_msg.header.stamp = self.get_clock().now().to_msg()
+        pose_msg.header.frame_id = 'map'
+        
+        pose_msg.pose.position.x = self.camera_x
+        pose_msg.pose.position.y = self.camera_y
+        pose_msg.pose.position.z = self.camera_z
+        
+        # Simplified orientation (identity quaternion)
+        pose_msg.pose.orientation.w = 1.0
+        
+        self.pose_pub.publish(pose_msg)
+
+    def publish_trajectory(self):
+        """Publish trajectory as line markers"""
+        if len(self.trajectory) < 2:
+            return
+            
+        marker = Marker()
+        marker.header.frame_id = 'map'
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.id = 0
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        
+        marker.scale.x = 0.02  # Line width
+        marker.color.r = 0.0
+        marker.color.g = 1.0
+        marker.color.b = 0.0
+        marker.color.a = 1.0
+        
+        for x, y, z in self.trajectory:
+            point = Point()
+            point.x = float(x)
+            point.y = float(y)
+            point.z = float(z)
+            marker.points.append(point)
+        
+        self.trajectory_pub.publish(marker)
+
+    def publish_map_points(self):
+        """Publish 3D map points"""
+        if not self.map_points:
+            return
+            
+        marker_array = MarkerArray()
+        
+        for i, (x, y, z) in enumerate(self.map_points[-50:]):  # Show last 50 points
+            marker = Marker()
+            marker.header.frame_id = 'map'
+            marker.header.stamp = self.get_clock().now().to_msg()
+            marker.id = i
+            marker.type = Marker.SPHERE
+            marker.action = Marker.ADD
+            
+            marker.pose.position.x = float(x)
+            marker.pose.position.y = float(y)
+            marker.pose.position.z = float(z)
+            marker.pose.orientation.w = 1.0
+            
+            marker.scale.x = 0.05
+            marker.scale.y = 0.05
+            marker.scale.z = 0.05
+            
+            marker.color.r = 1.0
+            marker.color.g = 0.0
+            marker.color.b = 0.0
+            marker.color.a = 1.0
+            
+            marker_array.markers.append(marker)
+        
+        self.points_pub.publish(marker_array)
+
+def main(args=None):
+    rclpy.init(args=args)
+    slam_node = MonoSLAM()
+    try:
+        rclpy.spin(slam_node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        slam_node.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
