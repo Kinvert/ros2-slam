@@ -46,9 +46,9 @@ class MonoSLAM(Node):
         
         # Camera matrix (you'll need to calibrate your camera for better results)
         # These are rough estimates - calibrate your actual camera!
-        self.K = np.array([[500, 0, 320],
-                          [0, 500, 240],
-                          [0, 0, 1]], dtype=np.float32)
+        self.K = np.array([[509.13, 0, 327.5], # 500 0 320
+                          [0, 509.65, 246.27], # 0 500 240
+                          [0, 0, 1]], dtype=np.float32) # 0 0 1
         
         self.get_logger().info('SLAM node started')
 
