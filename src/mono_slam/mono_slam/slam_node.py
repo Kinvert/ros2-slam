@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import CompressedImage
+from sensor_msgs.msg import CompressedImage, Image
+from cv_bridge import CvBridge
 from geometry_msgs.msg import PoseStamped, Point
 from visualization_msgs.msg import Marker, MarkerArray
 import cv2
@@ -23,6 +24,8 @@ class MonoSLAM(Node):
         self.pose_pub = self.create_publisher(PoseStamped, 'slam/pose', 10)
         self.points_pub = self.create_publisher(MarkerArray, 'slam/points', 10)
         self.trajectory_pub = self.create_publisher(Marker, 'slam/trajectory', 10)
+        self.debug_image_pub = self.create_publisher(Image, 'slam/debug_image', 10)
+        self.bridge = CvBridge()
         
         # SLAM state
         self.prev_frame = None
@@ -101,6 +104,7 @@ class MonoSLAM(Node):
                         # Publish visualization
                         self.publish_trajectory()
                         self.publish_map_points()
+                        self.publish_debug_image(frame, kp, matches)
                         
                         self.get_logger().info(f'Position: x={self.camera_x:.2f}, y={self.camera_y:.2f}, z={self.camera_z:.2f}, Features: {len(matches)}')
             
@@ -108,6 +112,10 @@ class MonoSLAM(Node):
             self.prev_frame = gray.copy()
             self.prev_kp = kp
             self.prev_des = des
+            
+            # If no previous frame, still publish debug image with keypoints
+            if self.prev_frame is None:
+                self.publish_debug_image(frame, kp, [])
             
         except Exception as e:
             self.get_logger().error(f'SLAM processing error: {str(e)}')
@@ -244,6 +252,41 @@ class MonoSLAM(Node):
             marker_array.markers.append(marker)
         
         self.points_pub.publish(marker_array)
+
+    def publish_debug_image(self, frame, keypoints, matches):
+        """Publish debug image with keypoints and matches visualization"""
+        try:
+            debug_frame = frame.copy()
+            
+            # Draw all keypoints in blue
+            for kp in keypoints:
+                x, y = int(kp.pt[0]), int(kp.pt[1])
+                cv2.circle(debug_frame, (x, y), 3, (255, 0, 0), 1)  # Blue circles
+            
+            # Draw matched keypoints in green if we have matches
+            if matches and self.prev_kp is not None:
+                for match in matches[:50]:  # Show first 50 matches
+                    curr_kp = keypoints[match.trainIdx]
+                    x, y = int(curr_kp.pt[0]), int(curr_kp.pt[1])
+                    cv2.circle(debug_frame, (x, y), 5, (0, 255, 0), 2)  # Green circles for matches
+            
+            # Add text overlay with info
+            cv2.putText(debug_frame, f'Keypoints: {len(keypoints)}', (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.putText(debug_frame, f'Matches: {len(matches) if matches else 0}', (10, 60),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.putText(debug_frame, f'Pos: ({self.camera_x:.1f}, {self.camera_y:.1f}, {self.camera_z:.1f})',
+                       (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            
+            # Convert OpenCV image to ROS Image message
+            debug_msg = self.bridge.cv2_to_imgmsg(debug_frame, encoding='bgr8')
+            debug_msg.header.stamp = self.get_clock().now().to_msg()
+            debug_msg.header.frame_id = 'camera'
+            
+            self.debug_image_pub.publish(debug_msg)
+            
+        except Exception as e:
+            self.get_logger().warn(f'Debug image publishing error: {str(e)}')
 
 def main(args=None):
     rclpy.init(args=args)
