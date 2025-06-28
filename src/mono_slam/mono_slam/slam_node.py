@@ -45,6 +45,11 @@ class MonoSLAM(Node):
         # Map points (3D landmarks)
         self.map_points = []
         
+        # Relocalization data
+        self.keyframes = []  # Store keyframes with their poses and descriptors
+        self.keyframe_interval = 10  # Add keyframe every N frames
+        self.frame_count = 0
+        
         # Trajectory
         self.trajectory = deque(maxlen=1000)
         
@@ -66,6 +71,8 @@ class MonoSLAM(Node):
             # Detect features
             kp, des = self.orb.detectAndCompute(gray, None)
             
+            self.frame_count += 1
+            
             if self.prev_frame is not None and des is not None and self.prev_des is not None:
                 # Match features
                 matches = self.matcher.match(self.prev_des, des)
@@ -84,7 +91,7 @@ class MonoSLAM(Node):
                         _, R, t, mask_pose = cv2.recoverPose(E, prev_pts, curr_pts, self.K)
                         
                         # Update camera pose properly
-                        scale = 0.1  # Adjust this based on your scene scale
+                        scale = 1.0  # Adjust this based on your scene scale
                         t_world = self.camera_R @ (t * scale)
                         self.camera_x += t_world[0, 0]
                         self.camera_y += t_world[1, 0]
@@ -97,6 +104,15 @@ class MonoSLAM(Node):
                         # Triangulate points for map
                         if len(self.map_points) < 100:  # Limit map size
                             self.triangulate_points(prev_pts, curr_pts, R, t)
+                        
+                        # Check for relocalization opportunity
+                        reloc_success = self.check_relocalization(kp, des)
+                        if reloc_success:
+                            self.get_logger().info("Relocalization successful!")
+                        
+                        # Add keyframe if needed
+                        if self.frame_count % self.keyframe_interval == 0:
+                            self.add_keyframe(kp, des)
                         
                         # Publish pose
                         self.publish_pose()
@@ -116,6 +132,9 @@ class MonoSLAM(Node):
             # If no previous frame, still publish debug image with keypoints
             if self.prev_frame is None:
                 self.publish_debug_image(frame, kp, [])
+                # Add first keyframe
+                if des is not None:
+                    self.add_keyframe(kp, des)
             
         except Exception as e:
             self.get_logger().error(f'SLAM processing error: {str(e)}')
@@ -287,6 +306,57 @@ class MonoSLAM(Node):
             
         except Exception as e:
             self.get_logger().warn(f'Debug image publishing error: {str(e)}')
+
+    def add_keyframe(self, keypoints, descriptors):
+        """Add current frame as a keyframe for relocalization"""
+        if descriptors is not None:
+            keyframe = {
+                'pose': (self.camera_x, self.camera_y, self.camera_z, self.camera_R.copy()),
+                'descriptors': descriptors.copy(),
+                'keypoints': keypoints
+            }
+            self.keyframes.append(keyframe)
+            
+            # Limit number of keyframes to prevent memory issues
+            if len(self.keyframes) > 50:
+                self.keyframes.pop(0)
+            
+            self.get_logger().info(f'Added keyframe {len(self.keyframes)}, total keyframes: {len(self.keyframes)}')
+
+    def check_relocalization(self, current_kp, current_des):
+        """Check if current frame matches any previous keyframes"""
+        if current_des is None or len(self.keyframes) < 3:
+            return False
+        
+        best_matches = 0
+        best_keyframe = None
+        
+        # Compare against recent keyframes (skip the most recent few to avoid immediate matches)
+        for i, keyframe in enumerate(self.keyframes[:-3]):
+            matches = self.matcher.match(keyframe['descriptors'], current_des)
+            matches = [m for m in matches if m.distance < 50]  # Filter good matches
+            
+            if len(matches) > best_matches and len(matches) > 20:  # Need significant matches
+                best_matches = len(matches)
+                best_keyframe = keyframe
+        
+        if best_keyframe is not None:
+            # Found a good match - this is a relocalization opportunity
+            self.get_logger().info(f'Relocalization candidate: {best_matches} matches')
+            
+            # Simple relocalization: slightly adjust pose toward the matched keyframe
+            # (In a full SLAM system, you'd do pose optimization here)
+            kf_x, kf_y, kf_z, kf_R = best_keyframe['pose']
+            
+            # Gentle correction toward the keyframe pose
+            correction_factor = 0.1  # How much to trust the relocalization
+            self.camera_x = (1 - correction_factor) * self.camera_x + correction_factor * kf_x
+            self.camera_y = (1 - correction_factor) * self.camera_y + correction_factor * kf_y
+            self.camera_z = (1 - correction_factor) * self.camera_z + correction_factor * kf_z
+            
+            return True
+        
+        return False
 
 def main(args=None):
     rclpy.init(args=args)
