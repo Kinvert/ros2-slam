@@ -29,10 +29,11 @@ class MonoSLAM(Node):
         self.prev_kp = None
         self.prev_des = None
         
-        # Camera pose (simplified - just 2D translation for now)
+        # Camera pose
         self.camera_x = 0.0
         self.camera_y = 0.0
         self.camera_z = 0.0
+        self.camera_R = np.eye(3)  # Current rotation matrix
         
         # Feature detector
         self.orb = cv2.ORB_create(nfeatures=500)
@@ -79,10 +80,13 @@ class MonoSLAM(Node):
                         # Recover pose
                         _, R, t, mask_pose = cv2.recoverPose(E, prev_pts, curr_pts, self.K)
                         
-                        # Update camera position (simplified)
-                        self.camera_x += t[0, 0] * 0.1  # Scale factor
-                        self.camera_y += t[1, 0] * 0.1
-                        self.camera_z += t[2, 0] * 0.1
+                        # Update camera pose properly
+                        scale = 0.1  # Adjust this based on your scene scale
+                        t_world = self.camera_R @ (t * scale)
+                        self.camera_x += t_world[0, 0]
+                        self.camera_y += t_world[1, 0]
+                        self.camera_z += t_world[2, 0]
+                        self.camera_R = self.camera_R @ R
                         
                         # Add to trajectory
                         self.trajectory.append((self.camera_x, self.camera_y, self.camera_z))
@@ -126,10 +130,12 @@ class MonoSLAM(Node):
                 
                 # Add to map if reasonable depth
                 if 0.1 < point_3d[2] < 10.0:
+                    # Transform to world coordinates
+                    point_world = self.camera_R @ point_3d.flatten() + np.array([self.camera_x, self.camera_y, self.camera_z])
                     self.map_points.append((
-                        float(point_3d[0] + self.camera_x),
-                        float(point_3d[1] + self.camera_y),
-                        float(point_3d[2] + self.camera_z)
+                        float(point_world[0]),
+                        float(point_world[1]),
+                        float(point_world[2])
                     ))
         except Exception as e:
             self.get_logger().warn(f'Triangulation error: {str(e)}')
@@ -144,8 +150,38 @@ class MonoSLAM(Node):
         pose_msg.pose.position.y = self.camera_y
         pose_msg.pose.position.z = self.camera_z
         
-        # Simplified orientation (identity quaternion)
-        pose_msg.pose.orientation.w = 1.0
+        # Convert rotation matrix to quaternion using Shepperd method
+        trace = self.camera_R[0,0] + self.camera_R[1,1] + self.camera_R[2,2]
+        if trace > 0:
+            s = np.sqrt(trace + 1.0) * 2
+            w = 0.25 * s
+            x = (self.camera_R[2,1] - self.camera_R[1,2]) / s
+            y = (self.camera_R[0,2] - self.camera_R[2,0]) / s
+            z = (self.camera_R[1,0] - self.camera_R[0,1]) / s
+        else:
+            if self.camera_R[0,0] > self.camera_R[1,1] and self.camera_R[0,0] > self.camera_R[2,2]:
+                s = np.sqrt(1.0 + self.camera_R[0,0] - self.camera_R[1,1] - self.camera_R[2,2]) * 2
+                w = (self.camera_R[2,1] - self.camera_R[1,2]) / s
+                x = 0.25 * s
+                y = (self.camera_R[0,1] + self.camera_R[1,0]) / s
+                z = (self.camera_R[0,2] + self.camera_R[2,0]) / s
+            elif self.camera_R[1,1] > self.camera_R[2,2]:
+                s = np.sqrt(1.0 + self.camera_R[1,1] - self.camera_R[0,0] - self.camera_R[2,2]) * 2
+                w = (self.camera_R[0,2] - self.camera_R[2,0]) / s
+                x = (self.camera_R[0,1] + self.camera_R[1,0]) / s
+                y = 0.25 * s
+                z = (self.camera_R[1,2] + self.camera_R[2,1]) / s
+            else:
+                s = np.sqrt(1.0 + self.camera_R[2,2] - self.camera_R[0,0] - self.camera_R[1,1]) * 2
+                w = (self.camera_R[1,0] - self.camera_R[0,1]) / s
+                x = (self.camera_R[0,2] + self.camera_R[2,0]) / s
+                y = (self.camera_R[1,2] + self.camera_R[2,1]) / s
+                z = 0.25 * s
+
+        pose_msg.pose.orientation.x = float(x)
+        pose_msg.pose.orientation.y = float(y)
+        pose_msg.pose.orientation.z = float(z)
+        pose_msg.pose.orientation.w = float(w)
         
         self.pose_pub.publish(pose_msg)
 
