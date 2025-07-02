@@ -90,13 +90,45 @@ class MonoSLAM(Node):
                         # Recover pose
                         _, R, t, mask_pose = cv2.recoverPose(E, prev_pts, curr_pts, self.K)
                         
-                        # Update camera pose properly
-                        scale = 1.0  # Adjust this based on your scene scale
-                        t_world = self.camera_R @ (t * scale)
-                        self.camera_x += t_world[0, 0]
-                        self.camera_y += t_world[1, 0]
-                        self.camera_z += t_world[2, 0]
-                        self.camera_R = self.camera_R @ R
+                        # Improved pose update with better scale estimation
+                        # Use median distance between matched points to estimate scale
+                        prev_pts_filtered = prev_pts[mask_pose.ravel() == 1]
+                        curr_pts_filtered = curr_pts[mask_pose.ravel() == 1]
+                        
+                        if len(prev_pts_filtered) > 5:
+                            # Calculate distances between consecutive point pairs for scale estimation
+                            prev_dists = []
+                            curr_dists = []
+                            
+                            for i in range(len(prev_pts_filtered) - 1):
+                                prev_dist = np.linalg.norm(prev_pts_filtered[i] - prev_pts_filtered[i+1])
+                                curr_dist = np.linalg.norm(curr_pts_filtered[i] - curr_pts_filtered[i+1])
+                                if prev_dist > 1 and curr_dist > 1:  # Avoid very small distances
+                                    prev_dists.append(prev_dist)
+                                    curr_dists.append(curr_dist)
+                            
+                            # Estimate scale based on feature point distances
+                            if prev_dists and curr_dists:
+                                scale_ratio = np.median(np.array(prev_dists) / np.array(curr_dists))
+                                scale = max(0.01, min(2.0, scale_ratio * 0.1))  # Clamp scale to reasonable range
+                            else:
+                                scale = 0.1  # Default scale
+                        else:
+                            scale = 0.1
+                        
+                        # Update camera pose in proper coordinate frame
+                        # The translation t is from previous camera to current camera
+                        # Transform it to world coordinates
+                        t_scaled = t * scale
+                        
+                        # Update rotation first
+                        self.camera_R = R @ self.camera_R  # Compose rotations properly
+                        
+                        # Update position: new_pos = old_pos + R_world * translation
+                        t_world = self.camera_R @ t_scaled.flatten()
+                        self.camera_x += t_world[0]
+                        self.camera_y += t_world[1]
+                        self.camera_z += t_world[2]
                         
                         # Add to trajectory
                         self.trajectory.append((self.camera_x, self.camera_y, self.camera_z))
